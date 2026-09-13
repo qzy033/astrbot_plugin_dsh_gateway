@@ -26,11 +26,24 @@ _✨ 大肥鱼桥 · AstrBot 侧 ✨_
 
 ## 📦 安装
 
-**方式一：插件市场**
+**方式一：从仓库一键装（现在就能用）**
 
-在 AstrBot 插件市场搜索 `astrbot_plugin_dsh_gateway`，点击安装并启用。
+AstrBot 面板 → 插件管理 → 安装插件 → 仓库地址填本仓库地址：
 
-**方式二：手动**
+```
+https://github.com/qzy033/astrbot_plugin_dsh_gateway
+```
+
+本仓库根目录就是插件本体（`metadata.yaml`、`main.py`、`_conf_schema.json` 直接放在根下），
+所以填干净地址即可，**不要带 `/tree/...` 后缀**。装完 AstrBot 会按 `metadata.yaml` 里的 `name` 把目录改名成
+`astrbot_plugin_dsh_gateway`。
+
+**方式二：插件市场**
+
+等本插件通过市场收录后，可以直接在 AstrBot 插件市场搜索 `astrbot_plugin_dsh_gateway`，点击安装并启用。
+市场里暂时还搜不到就用方式一，装的是同一个仓库的同一份代码。
+
+**方式三：手动**
 
 把本目录放进 `AstrBot 数据目录/plugins/` 下，或者在面板的插件管理里上传本目录打成的 zip，然后按下面的「装完三步走」配置。
 
