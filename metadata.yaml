@@ -1,0 +1,21 @@
+name: astrbot_plugin_dsh_gateway
+display_name: 大肥鱼桥
+short_desc: 让本地 dsh 借 AstrBot 的通道把消息即时转达给你
+desc: >-
+  让 dsh（DeepSeek Harness）这类本地 agent 借 AstrBot 里那个角色的通道，把消息转达给你：
+  agent 的话不直接发到聊天窗口，而是先落到这一侧的中转箱，由助手角色总结成人话再送出，
+  任务做完就能即时收到回报。插件在本机开三个 HTTP 接口（/ping 自检、/send 发消息、
+  /relay 看未转达的中转件），用 Dashboard 的 jwt_secret 自签长期令牌写进访问文件，
+  dsh 侧读同一份即可对接；转达目标账号、平台、目录名与总结提示词都在插件配置里改，
+  不写死任何路径。只装这一侧也能安静运行，等 dsh 侧装好自己就接上。
+version: 0.5.0
+author: qzy033
+repo: https://github.com/qzy033/astrbot_plugin_dsh_gateway
+astrbot_version: ">=4.0.0"
+support_platforms:
+  - aiocqhttp
+tags:
+  - dsh
+  - 桥接
+  - 通知
+  - astrbot
