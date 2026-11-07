@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.7.0 · 2026-11-07
+
+- 新增直通模式（旁路）：私聊发 `dsh/1` 后，主人的话原文直送 dsh，dsh 的回话原文转回，不叫醒闸门、不做总结；`dsh/0` 退出，`dsh/2` 换一条新会话。开关状态落在 `cache/direct_state.json`，重启不丢
+- 修复 AstrBot 4.26+ 兼容问题（issue #1）：`StarTools.send_message_by_id` 已被上游删除，主动发送统一改走自 4.0 起稳定的 `StarTools.send_message(umo, chain)`；4.29.4 实测可用
+- 直通回话、即时总结回退、`direct: true` 直发三条路径统一走同一个发送函数；`send_message` 找不到平台时返回 `False`，现在也按失败处理并写清日志
+- 叫醒提示里不再写死某个人的称呼，改成「用户」
+- 新增配置项 `direct_enter_cmd`、`direct_exit_cmd`、`direct_new_cmd`、`direct_echo`
+
 ## v0.6.1 · 2026-09-13
 
 - 与 dsh 侧 npm 包对齐版本号；npm 包补上 dsh-plugin 关键字标签，让 1024 商店认得出 npm 安装方式

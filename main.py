@@ -17,6 +17,12 @@
       排一个 active_agent 一次性任务，把闸门智能体叫醒，由它自己读中转件、
       用自己的话转述；叫不动才回退到即时总结直发，最后还有兜底取件。
       配置项：wake_gatekeeper（默认开）、wake_delay_seconds（默认 3 秒）。
+  v0.7.0：直通模式（旁路）。主人在私聊里发 dsh/1 进入直通，之后他说的原文直接落进
+      cache/inbox 当指令投给 dsh，dsh 的回话原文原样推回，不叫醒闸门、也不做总结；
+      dsh/0 退出，dsh/2 在同一条直通里换一条新会话。状态落在 cache/direct_state.json，
+      重启不丢。配置项：direct_enter_cmd、direct_exit_cmd、direct_new_cmd、direct_echo。
+      同时修 AstrBot 4.26+ 兼容（issue #1）：上游删除了 StarTools.send_message_by_id，
+      主动发送统一改走自 4.0 起就稳定的 StarTools.send_message(umo, chain)。
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from pathlib import Path
 from quart import jsonify, request
 
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import Plain
@@ -54,6 +61,12 @@ UMO_MESSAGE_TYPE = {
 }
 
 ACCESS_FILE_NAME = "bridge_access.json"
+# 直通模式的开关状态落在这个文件里（放在 cache/ 下），写完重启也认得
+DIRECT_STATE_FILE_NAME = "direct_state.json"
+# 直通指令：主人自己发，插件抢在智能体之前拦下，不让它落到对话里
+DEFAULT_DIRECT_ENTER_CMD = "dsh/1"
+DEFAULT_DIRECT_EXIT_CMD = "dsh/0"
+DEFAULT_DIRECT_NEW_CMD = "dsh/2"
 # 没配 project_dir 时的默认项目名（落在用户主目录下）
 DEFAULT_PROJECT_DIRNAME = "dsh-astrbot-gateway"
 
@@ -108,7 +121,7 @@ def _sign_dashboard_token(secret: str, username: str) -> str:
     PLUGIN_NAME,
     "dsh-astrbot-gateway",
     "dsh 与 AstrBot 之间的传话桥：dsh 的消息交给闸门智能体，由闸门转达用户。",
-    "0.6.1",
+    "0.7.0",
     "",
 )
 class DshBridgePlugin(Star):
@@ -143,6 +156,17 @@ class DshBridgePlugin(Star):
         except Exception:
             self.wake_delay_seconds = 3
         self.tag = str(cfg.get("tag") or "[dsh]").strip()
+        # ── v0.7.0 直通模式（旁路） ──
+        self.direct_enter_cmd = str(cfg.get("direct_enter_cmd") or DEFAULT_DIRECT_ENTER_CMD).strip()
+        self.direct_exit_cmd = str(cfg.get("direct_exit_cmd") or DEFAULT_DIRECT_EXIT_CMD).strip()
+        self.direct_new_cmd = str(cfg.get("direct_new_cmd") or DEFAULT_DIRECT_NEW_CMD).strip()
+        self.direct_echo = cfg.get("direct_echo") is True
+        self.direct_state_path = self.project_dir / "cache" / DIRECT_STATE_FILE_NAME
+        self.inbox_dir = self.project_dir / "cache" / "inbox"
+        self._direct = self._load_direct_state()
+        self._direct_seq = 0
+        self._direct_new_session = False
+        self._thread_seq = 0
         # 总结用的系统提示词：配置里填了就用自己的，没填就用内置通用版
         self.summary_prompt = str(cfg.get("summary_prompt") or "").strip() or SUMMARY_SYSTEM_PROMPT
         umo_type = UMO_MESSAGE_TYPE.get(self.target_type, "OtherMessage")
@@ -176,7 +200,13 @@ class DshBridgePlugin(Star):
             ["GET"],
             "查看闸门中转箱里还没转达出去的 dsh 消息",
         )
-        logger.info("[dsh-gateway] 路由注册完成（唯一闸门 · 即时转达模式）")
+        logger.info(
+            "[dsh-gateway] 路由注册完成（唯一闸门 · 叫醒转达 + 直通旁路）"
+        )
+        logger.info(
+            "[dsh-gateway] 发送通道：StarTools.send_message(umo, chain)，"
+            "兼容 AstrBot 4.0–4.29；4.26 起上游已删除 send_message_by_id，本插件不再使用它。"
+        )
         logger.info(
             "[dsh-gateway] 安装提示：① 在插件配置里填「转达目标账号」；"
             f"②「桥接项目目录」留空即用 {Path.home() / DEFAULT_PROJECT_DIRNAME}，dsh 侧要填同一个；"
@@ -262,15 +292,31 @@ class DshBridgePlugin(Star):
                 return provider
         return None
 
-    async def _send_to_target(self, text: str) -> bool:
+    async def _send_to_target(
+        self, text: str, target: str = "", msg_type: str = ""
+    ) -> bool:
+        """主动给用户发一条文本。
+
+        v0.7.0 起改走 StarTools.send_message(umo, chain)：
+        AstrBot 4.26.0 删除了旧的 StarTools.send_message_by_id（issue #1），
+        而 send_message 从 4.0.0 到 4.29.4 一直都在，是唯一稳定的主动发送入口。
+        umo 形如 <平台实例id>:<FriendMessage|GroupMessage>:<目标id>，
+        由 _current_relay_umo() 负责把配置里的平台名/消息类型换算过去。
+        send_message 找不到匹配平台时**返回 False 而不是抛异常**，也要按失败处理。
+        """
         try:
+            umo = self._current_relay_umo(target, msg_type)
+            if not umo:
+                logger.error("[dsh-gateway] 没有「转达目标账号」，发不出去")
+                return False
             chain = MessageChain([Plain(text)])
-            await StarTools.send_message_by_id(
-                self.target_type,
-                self.target_id,
-                chain,
-                platform=self.platform,
-            )
+            ok = await StarTools.send_message(umo, chain)
+            if ok is False:
+                logger.error(
+                    f"[dsh-gateway] 转达用户失败：宿主没找到匹配的平台（umo={umo}）；"
+                    "请检查「平台」与「umo_platform」两项配置"
+                )
+                return False
             return True
         except Exception as exc:
             logger.error(f"[dsh-gateway] 转达用户失败: {exc}", exc_info=True)
@@ -359,10 +405,18 @@ class DshBridgePlugin(Star):
             logger.warning(f"[dsh-gateway] 解析平台实例 id 失败: {exc}")
         return self.platform
 
-    def _current_relay_umo(self) -> str:
-        if not self.target_id:
+    def _current_relay_umo(self, target_id: str = "", msg_type: str = "") -> str:
+        """拼主动发送用的 umo：<平台实例id>:<MessageType>:<会话id>。
+
+        默认用插件配置里的转达目标与消息类型；直发分支可以临时传别的目标。
+        消息类型必须用平台那套叫法（FriendMessage / GroupMessage），
+        配置里的 PrivateMessage / GroupMessage 要经 UMO_MESSAGE_TYPE 换算。
+        """
+        target = target_id or self.target_id
+        if not target:
             return ""
-        return f"{self._resolve_umo_platform()}:{self.umo_type}:{self.target_id}"
+        kind = UMO_MESSAGE_TYPE.get(msg_type or self.target_type, self.umo_type)
+        return f"{self._resolve_umo_platform()}:{kind}:{target}"
 
     def _build_wake_note(self, item_id: str, text: str, path: Path) -> str:
         """叫醒闸门时投给它的话。"""
@@ -374,7 +428,7 @@ class DshBridgePlugin(Star):
             "\n"
             "请照这样做：\n"
             "1. 先读这个文件，看清它说的是什么、做到哪一步、有没有完成。\n"
-            "2. 用你自己的话把它讲给 qzy 听，标明来自 dsh。\n"
+            "2. 用你自己的话把它讲给用户听，标明来自 dsh。\n"
             f"3. 讲完把这个文件移动到 {self.relay_done_dir} 目录，别留在中转箱里。\n"
             "不要只凭这段提示就转述，一定要先读文件。原文附在下面，仅供参考：\n"
             "\n"
@@ -433,6 +487,155 @@ class DshBridgePlugin(Star):
         )
         return True
 
+    # ---------- 直通模式（旁路） ----------
+    #
+    # 平时主人的每句话先到闸门手里筛一遍，dsh 的回话也先落中转箱、再由闸门转述。
+    # 直通就是把这两道一起撤掉：主人在私聊里发 dsh/1 之后，他说的话原文直接写成
+    # cache/inbox 里的指令，dsh 的回话原文原样推回去，全程不叫醒闸门、不做总结。
+    # dsh/0 退出，dsh/2 在同一条直通里换新会话。开关落盘，重启也认得。
+
+    def _load_direct_state(self) -> dict:
+        try:
+            raw = json.loads(self.direct_state_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return {
+                    "on": bool(raw.get("on")),
+                    "thread": str(raw.get("thread") or ""),
+                    "since": str(raw.get("since") or ""),
+                }
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning(f"[dsh-gateway] 读直通状态失败，按关闭处理: {exc}")
+        return {"on": False, "thread": "", "since": ""}
+
+    def _save_direct_state(self, on: bool, thread: str) -> None:
+        self._direct = {
+            "on": bool(on),
+            "thread": str(thread or ""),
+            "since": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            self.direct_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.direct_state_path.write_text(
+                json.dumps(self._direct, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"[dsh-gateway] 写直通状态失败: {exc}")
+
+    def _new_thread_id(self) -> str:
+        # 带序号：同一秒里连发 dsh/1 和 dsh/2 也可能发生，光靠秒级时间戳会撞号
+        self._thread_seq += 1
+        return f"direct-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{self._thread_seq:02d}"
+
+    def _write_direct_inbox(self, text: str) -> str:
+        """把主人的原文写成一条 inbox 指令，交给 dsh 侧自动拉起处理。"""
+        try:
+            self.inbox_dir.mkdir(parents=True, exist_ok=True)
+            now = datetime.now()
+            self._direct_seq += 1
+            task_id = f"direct-{now.strftime('%Y%m%d-%H%M%S')}-{self._direct_seq:02d}"
+            item = {
+                "id": task_id,
+                "from": "master",
+                "to": "dsh",
+                "time": now.astimezone().isoformat(timespec="seconds"),
+                "type": "task",
+                "content": text,
+                "status": "pending",
+                "source": self.source_label,
+                "thread": self._direct.get("thread") or "",
+                "direct": True,
+            }
+            # 进直通后的第一条、以及 dsh/2 之后的头一条，让 dsh 侧开新会话
+            if self._direct_new_session:
+                item["newSession"] = True
+                self._direct_new_session = False
+            path = self.inbox_dir / f"{task_id}.json"
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            self._log_event(
+                {
+                    "id": task_id,
+                    "time": now.astimezone().isoformat(timespec="seconds"),
+                    "kind": "master-direct",
+                    "source": "master",
+                    "text": text,
+                    "summary": "直通：原文已投 inbox，等 dsh 回话",
+                    "delivered": True,
+                    "thread": item["thread"],
+                }
+            )
+            logger.info(
+                f"[dsh-gateway] 直通已投 {task_id}（会话 {item['thread'] or '未标记'}）: {text[:30]}"
+            )
+            return task_id
+        except Exception as exc:
+            logger.error(f"[dsh-gateway] 直通投递失败: {exc}", exc_info=True)
+            return ""
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=10)
+    async def on_owner_private_message(self, event: AstrMessageEvent):
+        """私聊里先拦主人的话：开关直通；直通期间把原文直接投给 dsh。
+
+        优先级给 10，是为了抢在默认对话处理之前把事件停掉，
+        否则主人那句 dsh/1 会被当成聊天内容，闸门也会跟着答一句。
+        """
+        if not self.target_id:
+            return
+        try:
+            sender = str(event.get_sender_id())
+        except Exception:
+            return
+        if sender != self.target_id:
+            return
+        text = str(getattr(event, "message_str", "") or "").strip()
+        if not text:
+            return
+
+        low = text.lower()
+        if low == self.direct_enter_cmd.lower():
+            thread = self._new_thread_id()
+            self._save_direct_state(True, thread)
+            self._direct_new_session = True
+            await self._send_to_target(
+                f"直通已开，会话 {thread}。"
+                "接下来你说的话人家原样直送 dsh，它的回话也原样转回，人家不插嘴也不总结。"
+                f"发 {self.direct_exit_cmd} 退出，发 {self.direct_new_cmd} 换一条新会话。"
+            )
+            logger.info(f"[dsh-gateway] 直通开启（会话 {thread}）")
+            event.stop_event()
+            return
+
+        if low == self.direct_exit_cmd.lower():
+            thread = self._direct.get("thread") or ""
+            self._save_direct_state(False, "")
+            await self._send_to_target(
+                f"直通已关，会话 {thread} 收工。你的话以后还是先过人家这道闸门。"
+            )
+            logger.info("[dsh-gateway] 直通关闭")
+            event.stop_event()
+            return
+
+        if low == self.direct_new_cmd.lower():
+            thread = self._new_thread_id()
+            self._save_direct_state(True, thread)
+            self._direct_new_session = True
+            await self._send_to_target(f"换好了，新会话 {thread}，直通还开着。")
+            logger.info(f"[dsh-gateway] 直通换会话（{thread}）")
+            event.stop_event()
+            return
+
+        if not self._direct.get("on"):
+            return
+
+        task_id = self._write_direct_inbox(text)
+        if self.direct_echo:
+            await self._send_to_target("已直送 dsh。" if task_id else "直送失败，人家去看看日志。")
+        event.stop_event()
+
     # ---------- 接口 ----------
     async def api_ping(self):
         return jsonify({"ok": True, "plugin": PLUGIN_NAME, "message": "pong"})
@@ -472,19 +675,48 @@ class DshBridgePlugin(Star):
 
         # 紧急直发才允许绕过闸门（默认关闭，dsh 不该用）
         if data.get("direct") is True:
-            try:
-                chain = MessageChain([Plain(text)])
-                await StarTools.send_message_by_id(
-                    msg_type,
-                    target,
-                    chain,
-                    platform=self.platform,
+            if not await self._send_to_target(text, target=target, msg_type=msg_type):
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "message": "直发失败：详见插件日志里 [dsh-gateway] 那一行",
+                        }
+                    ),
+                    500,
                 )
-            except Exception as exc:
-                logger.error(f"[dsh-gateway] 直发失败: {exc}", exc_info=True)
-                return jsonify({"ok": False, "message": str(exc)}), 500
             logger.info(f"[dsh-gateway] 直发到 {target}: {text[:30]}")
             return jsonify({"ok": True, "direct": True, "target": target})
+
+        # v0.7.0 直通模式：主人开着直通时，dsh 的回话原样转回，不总结、不叫醒闸门
+        if self._direct.get("on"):
+            delivered = await self._send_to_target(text)
+            now = datetime.now()
+            self._log_event(
+                {
+                    "id": f"dsh-direct-{now.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}",
+                    "time": now.isoformat(timespec="seconds"),
+                    "kind": "dsh-direct",
+                    "source": self.source_label,
+                    "text": text,
+                    "summary": "直通：原文转回主人，未过闸门总结",
+                    "delivered": delivered,
+                    "thread": self._direct.get("thread") or "",
+                }
+            )
+            logger.info(
+                f"[dsh-gateway] 直通原文转回（{'成功' if delivered else '失败'}）: {text[:30]}"
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "direct": True,
+                    "mode": "bypass",
+                    "delivered": delivered,
+                    "length": len(text),
+                    "message": "直通模式：原文已转回主人，未经过闸门总结。",
+                }
+            )
 
         # 默认路径：落盘 + 立刻总结转达（不阻塞 dsh）
         try:

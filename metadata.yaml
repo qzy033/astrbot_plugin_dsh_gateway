@@ -9,7 +9,10 @@ desc: >-
   用 Dashboard 的 jwt_secret 自签长期令牌写进访问文件，dsh 侧读同一份即可对接；
   转达目标账号、平台、目录名与总结提示词都在插件配置里改，不写死任何路径。
   只装这一侧也能安静运行，等 dsh 侧装好自己就接上。
-version: 0.6.1
+  另带直通模式（旁路）：主人在私聊里发 dsh/1，之后的话原文直送 dsh、回话原文转回，
+  不叫醒助手也不做总结；dsh/0 退出，dsh/2 换一条新会话。
+  兼容 AstrBot 4.0–4.29，主动发送走 StarTools.send_message(umo)，不依赖 4.26 已删除的旧接口。
+version: 0.7.0
 author: qzy033
 repo: https://github.com/qzy033/astrbot_plugin_dsh_gateway
 astrbot_version: ">=4.0.0"

@@ -98,5 +98,29 @@
     "type": "text",
     "hint": "想换成自己的口吻就整段填这里，可参考仓库 config/summary-prompt.md。它管不到叫醒闸门那条路，闸门说什么由它自己的人格设定决定。",
     "default": ""
+  },
+  "direct_enter_cmd": {
+    "description": "进直通的指令：在私聊里发它，之后你说的话原文直送 dsh，它的回话原文转回，不叫醒闸门、不做总结。",
+    "type": "string",
+    "hint": "默认 dsh/1。指令本身会被插件拦下，不会落进对话，也不会被当成任务投给 dsh。改完要重载插件才生效；和 dsh 侧无关，那边不用改。",
+    "default": "dsh/1"
+  },
+  "direct_exit_cmd": {
+    "description": "退直通的指令：发它就回到原来的闸门模式，你的话重新先经过闸门。",
+    "type": "string",
+    "hint": "默认 dsh/0。退出时插件会把当时的会话号一起报给你。",
+    "default": "dsh/0"
+  },
+  "direct_new_cmd": {
+    "description": "换会话的指令：直通还开着，但下一条起换一条全新的 dsh 会话，不接着上一轮的上下文。",
+    "type": "string",
+    "hint": "默认 dsh/2。直通里几条话是接着聊的，用的是同一条 dsh 会话；想另起炉灶就发它，别用 dsh/0 再 dsh/1。",
+    "default": "dsh/2"
+  },
+  "direct_echo": {
+    "description": "直通回执：开着的话，每投一条都回你一句「已直送 dsh」，方便确认话送到了。",
+    "type": "bool",
+    "hint": "默认关。关着更干净，话投没投进可以看 relay_events.jsonl 里的 master-direct 记录；嫌吵就保持关闭。",
+    "default": false
   }
 }
